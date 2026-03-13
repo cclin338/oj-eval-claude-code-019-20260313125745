@@ -70,7 +70,7 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     Matrix* QK = matrix_memory_allocator.Allocate("QK");
     gpu_sim.MatMul(current_query, K_all, QK);
 
-    // Step 6: Apply softmax ROW-WISE
+    // Step 6 & 7: Apply softmax ROW-WISE and compute result incrementally
     // Apply exp element-wise first
     Matrix* QK_exp = matrix_memory_allocator.Allocate("QK_exp");
     gpu_sim.MatExp(QK, QK_exp);
@@ -78,9 +78,8 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     // Release QK to free memory
     gpu_sim.ReleaseMatrix(QK);
 
-    // For each row, compute sum and divide
-    // Note: We need to process each row separately for proper softmax
-    Matrix* QK_softmax = nullptr;
+    // Process each row: compute softmax and multiply with V_all
+    Matrix* result = nullptr;
     for (size_t row = 0; row <= i; ++row) {
       // Get row from QK_exp
       Matrix* row_exp = matrix_memory_allocator.Allocate("row_exp");
@@ -90,36 +89,36 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
       Matrix* row_sum = matrix_memory_allocator.Allocate("row_sum");
       gpu_sim.Sum(row_exp, row_sum);
 
-      // Divide row by sum
+      // Divide row by sum to get softmax
       Matrix* row_softmax = matrix_memory_allocator.Allocate("row_softmax");
       gpu_sim.MatDiv(row_exp, row_sum, row_softmax);
 
-      // Concatenate rows
+      // Multiply this row with V_all to get output row
+      // row_softmax: [1, i+1], V_all: [i+1, 512] → output_row: [1, 512]
+      Matrix* output_row = matrix_memory_allocator.Allocate("output_row");
+      gpu_sim.MatMul(row_softmax, V_all, output_row);
+
+      // Concatenate output rows
       if (row == 0) {
-        QK_softmax = row_softmax;
+        result = output_row;
       } else {
-        Matrix* new_rows = matrix_memory_allocator.Allocate("new_rows");
-        gpu_sim.Concat(QK_softmax, row_softmax, new_rows, 0, kInSharedMemory);
-        // Release old QK_softmax
-        if (row > 1) {
-          gpu_sim.ReleaseMatrix(QK_softmax);
-        }
-        QK_softmax = new_rows;
-        // Release row_softmax as it's now part of new_rows
-        gpu_sim.ReleaseMatrix(row_softmax);
+        Matrix* new_result = matrix_memory_allocator.Allocate("new_result");
+        gpu_sim.Concat(result, output_row, new_result, 0, kInSharedMemory);
+        // Release old result and output_row
+        gpu_sim.ReleaseMatrix(result);
+        gpu_sim.ReleaseMatrix(output_row);
+        result = new_result;
       }
 
       // Release temporary matrices
       gpu_sim.ReleaseMatrix(row_exp);
       gpu_sim.ReleaseMatrix(row_sum);
+      gpu_sim.ReleaseMatrix(row_softmax);
     }
 
-    // Release QK_exp after processing all rows
+    // Release QK_exp and V_all after processing
     gpu_sim.ReleaseMatrix(QK_exp);
-
-    // Step 7: Compute Softmax × V_all (shape: [i+1, 512])
-    Matrix* result = matrix_memory_allocator.Allocate("result");
-    gpu_sim.MatMul(QK_softmax, V_all, result);
+    gpu_sim.ReleaseMatrix(V_all);
 
     // Step 8: Move result to HBM
     gpu_sim.MoveMatrixToGpuHbm(result);
