@@ -70,6 +70,9 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     Matrix* QK = matrix_memory_allocator.Allocate("QK");
     gpu_sim.MatMul(current_query, K_all, QK);
 
+    // Release K_all as it's no longer needed
+    gpu_sim.ReleaseMatrix(K_all);
+
     // Step 6 & 7: Apply softmax ROW-WISE and compute result incrementally
     // Apply exp element-wise first
     Matrix* QK_exp = matrix_memory_allocator.Allocate("QK_exp");
